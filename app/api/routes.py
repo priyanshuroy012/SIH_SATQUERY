@@ -105,7 +105,7 @@ def health(request: Request):
 
 
 # =========================================================
-# Detect change
+# Detect Change
 # =========================================================
 
 @router.post(
@@ -252,29 +252,9 @@ def detect_change(
             "Colab BIT inference completed."
         )
 
-        print(
-            f"BIT prediction: {prediction}"
-        )
-
 
         # =================================================
-        # 3. Build spatial analysis
-        # =================================================
-        #
-        # Current Colab endpoint returns:
-        #
-        # - change_detected
-        # - change_percentage
-        # - changed_pixels
-        # - total_pixels
-        # - image_size
-        #
-        # It does NOT currently return the complete
-        # change_mask.
-        #
-        # Therefore we create a statistics-based analysis
-        # object here.
-        #
+        # 3. Extract BIT change statistics
         # =================================================
 
         change_detection = prediction.get(
@@ -308,9 +288,37 @@ def detect_change(
         )
 
 
-        # -------------------------------------------------
-        # Determine simple severity
-        # -------------------------------------------------
+        # =================================================
+        # 4. Extract visualizations from Colab
+        # =================================================
+        #
+        # Colab now returns:
+        #
+        # visualizations:
+        #     mask
+        #     overlay
+        #
+        # Both are Base64 encoded PNG images.
+        #
+        # =================================================
+
+        visualizations = prediction.get(
+            "visualizations",
+            {}
+        )
+
+        mask_base64 = visualizations.get(
+            "mask"
+        )
+
+        overlay_base64 = visualizations.get(
+            "overlay"
+        )
+
+
+        # =================================================
+        # 5. Determine severity
+        # =================================================
 
         if change_percentage <= 0:
 
@@ -332,6 +340,18 @@ def detect_change(
 
             severity = "very_high"
 
+
+        # =================================================
+        # 6. Build spatial analysis
+        # =================================================
+        #
+        # At the moment Colab returns the complete mask
+        # as a visualization, but not as a numerical array.
+        #
+        # Therefore actual connected-component analysis
+        # is not performed here.
+        #
+        # =================================================
 
         analysis = {
 
@@ -366,16 +386,17 @@ def detect_change(
             "image_size": image_size,
 
             "note": (
-                "Spatial region analysis is not "
-                "available because the Colab inference "
-                "API currently returns change statistics "
-                "rather than the full change mask."
+                "The BIT inference service returns "
+                "the reconstructed change mask and "
+                "overlay as Base64 images. Detailed "
+                "connected-region statistics are not "
+                "currently calculated by the Render API."
             )
         }
 
 
         # =================================================
-        # 4. Generate explanation
+        # 7. Generate explanation
         # =================================================
 
         print(
@@ -399,7 +420,7 @@ def detect_change(
 
 
         # =================================================
-        # 5. Build final API response
+        # 8. Build final API response
         # =================================================
 
         return ChangeDetectionResponse(
@@ -461,7 +482,15 @@ def detect_change(
 
             spatial_analysis=analysis,
 
-            explanation=explanation
+            explanation=explanation,
+
+            visualizations={
+
+                "mask": mask_base64,
+
+                "overlay": overlay_base64
+
+            }
         )
 
 
