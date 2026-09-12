@@ -1,0 +1,30 @@
+# Python environment
+venv/
+.venv/
+
+# Secrets
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Model files
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Runtime/generated data
+data/downloads/
+data/outputs/
+data/cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

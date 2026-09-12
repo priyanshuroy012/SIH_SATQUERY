@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+
+numpy
+opencv-python
+Pillow
+
+torch
+torchvision
+einops
+
+sentinelhub
+
+scikit-learn
+matplotlib
