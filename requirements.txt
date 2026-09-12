@@ -4,15 +4,16 @@ pydantic
 python-dotenv
 
 numpy
-opencv-python
+opencv-python-headless
 Pillow
 
-torch
-torchvision
 einops
-
 sentinelhub
-
 scikit-learn
 matplotlib
+
 huggingface_hub
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
