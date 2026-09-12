@@ -22,9 +22,9 @@ router = APIRouter()
 @router.get("/health")
 def health(request: Request):
 
-    bit_service = getattr(
+    colab_bit_service = getattr(
         request.app.state,
-        "bit_service",
+        "colab_bit_service",
         None
     )
 
@@ -46,12 +46,32 @@ def health(request: Request):
         None
     )
 
+    startup_error = getattr(
+        request.app.state,
+        "startup_error",
+        None
+    )
+
+    all_services_ready = all([
+        satellite_service is not None,
+        colab_bit_service is not None,
+        change_analyzer is not None,
+        explanation_service is not None
+    ])
+
+    status = (
+        "healthy"
+        if all_services_ready and startup_error is None
+        else "unhealthy"
+    )
 
     return {
 
-        "status": "healthy",
+        "status": status,
 
         "service": "SATQuery Model 2",
+
+        "inference": "Google Colab",
 
         "services": {
 
@@ -61,9 +81,9 @@ def health(request: Request):
                 else "not_initialized"
             ),
 
-            "bit": (
+            "colab_bit": (
                 "initialized"
-                if bit_service is not None
+                if colab_bit_service is not None
                 else "not_initialized"
             ),
 
@@ -78,7 +98,9 @@ def health(request: Request):
                 if explanation_service is not None
                 else "not_initialized"
             )
-        }
+        },
+
+        "startup_error": startup_error
     }
 
 
@@ -103,41 +125,26 @@ def detect_change(
     # -----------------------------------------------------
 
     satellite_service = getattr(
-
         request.app.state,
-
         "satellite_service",
-
         None
     )
 
-
-    bit_service = getattr(
-
+    colab_bit_service = getattr(
         request.app.state,
-
-        "bit_service",
-
+        "colab_bit_service",
         None
     )
-
 
     change_analyzer = getattr(
-
         request.app.state,
-
         "change_analyzer",
-
         None
     )
 
-
     explanation_service = getattr(
-
         request.app.state,
-
         "explanation_service",
-
         None
     )
 
@@ -149,23 +156,19 @@ def detect_change(
     if satellite_service is None:
 
         raise HTTPException(
-
             status_code=500,
-
             detail=(
                 "Satellite service not initialized."
             )
         )
 
 
-    if bit_service is None:
+    if colab_bit_service is None:
 
         raise HTTPException(
-
             status_code=500,
-
             detail=(
-                "BIT service not initialized."
+                "Colab BIT service not initialized."
             )
         )
 
@@ -173,9 +176,7 @@ def detect_change(
     if change_analyzer is None:
 
         raise HTTPException(
-
             status_code=500,
-
             detail=(
                 "Change analyzer not initialized."
             )
@@ -185,9 +186,7 @@ def detect_change(
     if explanation_service is None:
 
         raise HTTPException(
-
             status_code=500,
-
             detail=(
                 "Explanation service not initialized."
             )
@@ -204,9 +203,7 @@ def detect_change(
             "Retrieving satellite imagery..."
         )
 
-
         satellite_result = (
-
             satellite_service.get_images(
 
                 latitude=data.latitude,
@@ -225,27 +222,24 @@ def detect_change(
 
 
         # =================================================
-        # 2. Run BIT
+        # 2. Send images to Colab BIT API
         # =================================================
 
         print(
-            "Running BIT change detection..."
+            "Sending satellite images to "
+            "Colab BIT inference..."
         )
 
-
         prediction = (
-
-            bit_service.detect(
+            colab_bit_service.detect(
 
                 before_path=(
-
                     satellite_result[
                         "before_image"
                     ]
                 ),
 
                 after_path=(
-
                     satellite_result[
                         "after_image"
                     ]
@@ -254,24 +248,130 @@ def detect_change(
         )
 
 
-        # =================================================
-        # 3. Spatial analysis
-        # =================================================
+        print(
+            "Colab BIT inference completed."
+        )
 
         print(
-            "Running spatial analysis..."
+            f"BIT prediction: {prediction}"
         )
 
 
-        analysis = (
+        # =================================================
+        # 3. Build spatial analysis
+        # =================================================
+        #
+        # Current Colab endpoint returns:
+        #
+        # - change_detected
+        # - change_percentage
+        # - changed_pixels
+        # - total_pixels
+        # - image_size
+        #
+        # It does NOT currently return the complete
+        # change_mask.
+        #
+        # Therefore we create a statistics-based analysis
+        # object here.
+        #
+        # =================================================
 
-            change_analyzer.analyze(
+        change_detection = prediction.get(
+            "change_detection",
+            {}
+        )
 
-                prediction[
-                    "change_mask"
-                ]
+        changed_pixels = change_detection.get(
+            "changed_pixels",
+            0
+        )
+
+        total_pixels = change_detection.get(
+            "total_pixels",
+            0
+        )
+
+        change_percentage = change_detection.get(
+            "change_percentage",
+            0
+        )
+
+        change_detected = change_detection.get(
+            "change_detected",
+            False
+        )
+
+        image_size = change_detection.get(
+            "image_size",
+            [1024, 1024]
+        )
+
+
+        # -------------------------------------------------
+        # Determine simple severity
+        # -------------------------------------------------
+
+        if change_percentage <= 0:
+
+            severity = "none"
+
+        elif change_percentage < 1:
+
+            severity = "low"
+
+        elif change_percentage < 5:
+
+            severity = "moderate"
+
+        elif change_percentage < 15:
+
+            severity = "high"
+
+        else:
+
+            severity = "very_high"
+
+
+        analysis = {
+
+            "changed_pixels": (
+                changed_pixels
+            ),
+
+            "total_pixels": (
+                total_pixels
+            ),
+
+            "change_percentage": (
+                change_percentage
+            ),
+
+            "change_detected": (
+                change_detected
+            ),
+
+            "number_of_regions": None,
+
+            "largest_region_pixels": None,
+
+            "centroid": None,
+
+            "bounding_box": None,
+
+            "dominant_region": None,
+
+            "severity": severity,
+
+            "image_size": image_size,
+
+            "note": (
+                "Spatial region analysis is not "
+                "available because the Colab inference "
+                "API currently returns change statistics "
+                "rather than the full change mask."
             )
-        )
+        }
 
 
         # =================================================
@@ -282,23 +382,17 @@ def detect_change(
             "Generating explanation..."
         )
 
-
         explanation = (
-
             explanation_service.generate(
 
                 analysis=analysis,
 
                 before_date=(
-
-                    data.before_date
-                    .isoformat()
+                    data.before_date.isoformat()
                 ),
 
                 after_date=(
-
-                    data.after_date
-                    .isoformat()
+                    data.after_date.isoformat()
                 )
             )
         )
@@ -312,7 +406,6 @@ def detect_change(
 
             status="success",
 
-
             location=Location(
 
                 latitude=data.latitude,
@@ -320,80 +413,53 @@ def detect_change(
                 longitude=data.longitude
             ),
 
-
             dates=ImageDates(
 
                 requested_before=(
-
-                    data.before_date
-                    .isoformat()
+                    data.before_date.isoformat()
                 ),
 
                 requested_after=(
-
-                    data.after_date
-                    .isoformat()
+                    data.after_date.isoformat()
                 ),
 
                 actual_before=(
-
                     satellite_result.get(
-
                         "actual_before_date"
                     )
                 ),
 
                 actual_after=(
-
                     satellite_result.get(
-
                         "actual_after_date"
                     )
                 )
             ),
 
-
             change_detection={
 
                 "change_detected": (
-
-                    prediction[
-                        "change_detected"
-                    ]
+                    change_detected
                 ),
 
                 "change_percentage": (
-
-                    prediction[
-                        "change_percentage"
-                    ]
+                    change_percentage
                 ),
 
                 "changed_pixels": (
-
-                    prediction[
-                        "changed_pixels"
-                    ]
+                    changed_pixels
                 ),
 
                 "total_pixels": (
-
-                    prediction[
-                        "total_pixels"
-                    ]
+                    total_pixels
                 ),
 
                 "image_size": (
-
-                    prediction[
-                        "image_size"
-                    ]
+                    image_size
                 )
             },
 
-
             spatial_analysis=analysis,
-
 
             explanation=explanation
         )
@@ -401,7 +467,6 @@ def detect_change(
 
     except HTTPException:
 
-        # Preserve intentionally raised HTTP errors
         raise
 
 
@@ -414,7 +479,6 @@ def detect_change(
         print(
             repr(e)
         )
-
 
         raise HTTPException(
 

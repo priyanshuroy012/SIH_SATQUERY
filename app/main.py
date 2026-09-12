@@ -10,8 +10,8 @@ from app.services.satellite_service import (
     SatelliteService
 )
 
-from app.services.bit_service import (
-    BITService
+from app.services.colab_bit_service import (
+    ColabBITService
 )
 
 from app.services.change_analysis import (
@@ -22,31 +22,16 @@ from app.services.explanation_service import (
     ExplanationService
 )
 
-from app.utils.checkpoint import (
-    get_bit_checkpoint
-)
-
 
 # =========================================================
 # Project paths
 # =========================================================
 
-# Project root:
-#
-# SATQuery-Model2/
-# ├── BIT_CD/
-# ├── app/
-# ├── models/
-# └── ...
-#
-BASE_DIR = Path(
-    __file__
-).resolve().parent.parent
-
-
-# BIT repository
-BIT_REPO_PATH = (
-    BASE_DIR / "BIT_CD"
+BASE_DIR = (
+    Path(__file__)
+    .resolve()
+    .parent
+    .parent
 )
 
 
@@ -62,73 +47,20 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
 
     # -----------------------------------------------------
-    # Default state
+    # Reset application state
     # -----------------------------------------------------
 
     app.state.startup_error = None
 
     app.state.satellite_service = None
-    app.state.bit_service = None
+    app.state.colab_bit_service = None
     app.state.change_analyzer = None
     app.state.explanation_service = None
 
     try:
 
         # =================================================
-        # 1. Check BIT repository
-        # =================================================
-
-        print(
-            f"BIT repository:\n"
-            f"{BIT_REPO_PATH}"
-        )
-
-        if not BIT_REPO_PATH.exists():
-
-            raise FileNotFoundError(
-                "BIT_CD repository not found at:\n"
-                f"{BIT_REPO_PATH}"
-            )
-
-        print(
-            "BIT repository found."
-        )
-
-
-        # =================================================
-        # 2. Download / locate BIT checkpoint
-        # =================================================
-
-        print(
-            "Preparing BIT checkpoint..."
-        )
-
-        bit_checkpoint_path = (
-            get_bit_checkpoint()
-        )
-
-        print(
-            f"BIT checkpoint:\n"
-            f"{bit_checkpoint_path}"
-        )
-
-        if not Path(
-            bit_checkpoint_path
-        ).exists():
-
-            raise FileNotFoundError(
-                "BIT checkpoint could not be found "
-                "after download:\n"
-                f"{bit_checkpoint_path}"
-            )
-
-        print(
-            "BIT checkpoint ready."
-        )
-
-
-        # =================================================
-        # 3. Initialize Satellite Service
+        # 1. Initialize Satellite Service
         # =================================================
 
         print(
@@ -149,41 +81,50 @@ async def lifespan(app: FastAPI):
 
 
         # =================================================
-        # 4. Initialize BIT Service
+        # 2. Initialize Colab BIT Service
         # =================================================
 
         print(
-            "Initializing BITService..."
+            "Initializing ColabBITService..."
         )
 
-        bit_service = BITService(
-
-            checkpoint_path=(
-                str(bit_checkpoint_path)
-            ),
-
-            bit_repo_path=(
-                str(BIT_REPO_PATH)
-            ),
-
-            patch_size=256,
-
-            image_size=1024,
-
-            device=None
+        colab_bit_service = (
+            ColabBITService()
         )
 
-        app.state.bit_service = (
-            bit_service
+        app.state.colab_bit_service = (
+            colab_bit_service
         )
 
         print(
-            "BITService initialized."
+            "ColabBITService initialized."
         )
 
 
         # =================================================
-        # 5. Initialize Change Analyzer
+        # 3. Check Colab BIT API
+        # =================================================
+
+        print(
+            "Checking Colab BIT API..."
+        )
+
+        colab_health = (
+            colab_bit_service.health_check()
+        )
+
+        print(
+            f"Colab BIT API response:\n"
+            f"{colab_health}"
+        )
+
+        print(
+            "Colab BIT API is reachable."
+        )
+
+
+        # =================================================
+        # 4. Initialize Change Analyzer
         # =================================================
 
         print(
@@ -204,7 +145,7 @@ async def lifespan(app: FastAPI):
 
 
         # =================================================
-        # 6. Initialize Explanation Service
+        # 5. Initialize Explanation Service
         # =================================================
 
         print(
@@ -225,7 +166,7 @@ async def lifespan(app: FastAPI):
 
 
         # =================================================
-        # 7. Startup complete
+        # 6. Startup complete
         # =================================================
 
         print("=" * 60)
@@ -234,14 +175,14 @@ async def lifespan(app: FastAPI):
             "SATQuery Model 2 initialized successfully."
         )
 
+        print(
+            "BIT inference is running on Google Colab."
+        )
+
         print("=" * 60)
 
 
     except Exception as e:
-
-        # =================================================
-        # Startup failure
-        # =================================================
 
         print("=" * 60)
 
@@ -259,10 +200,6 @@ async def lifespan(app: FastAPI):
             f"{type(e).__name__}: {e}"
         )
 
-
-    # -----------------------------------------------------
-    # Keep application running
-    # -----------------------------------------------------
 
     yield
 
@@ -290,7 +227,7 @@ app = FastAPI(
 
     description=(
         "Bitemporal satellite image change detection "
-        "using the BIT model."
+        "using the BIT model running on Google Colab."
     ),
 
     version="1.0.0",
@@ -342,6 +279,8 @@ def root():
 
         "status": "running",
 
+        "inference": "Google Colab",
+
         "message": (
             "Satellite change detection API is running."
         )
@@ -355,15 +294,15 @@ def root():
 @app.get("/health")
 def health_check():
 
-    bit_service = getattr(
-        app.state,
-        "bit_service",
-        None
-    )
-
     satellite_service = getattr(
         app.state,
         "satellite_service",
+        None
+    )
+
+    colab_bit_service = getattr(
+        app.state,
+        "colab_bit_service",
         None
     )
 
@@ -387,14 +326,14 @@ def health_check():
 
 
     # -----------------------------------------------------
-    # Determine actual health
+    # Determine service readiness
     # -----------------------------------------------------
 
     all_services_ready = all([
 
         satellite_service is not None,
 
-        bit_service is not None,
+        colab_bit_service is not None,
 
         change_analyzer is not None,
 
@@ -402,7 +341,10 @@ def health_check():
     ])
 
 
-    if all_services_ready and startup_error is None:
+    if (
+        all_services_ready
+        and startup_error is None
+    ):
 
         status = "healthy"
 
@@ -417,6 +359,8 @@ def health_check():
 
         "service": "SATQuery Model 2",
 
+        "inference": "Google Colab",
+
         "services": {
 
             "satellite": (
@@ -425,9 +369,9 @@ def health_check():
                 else "not_initialized"
             ),
 
-            "bit": (
+            "colab_bit": (
                 "initialized"
-                if bit_service is not None
+                if colab_bit_service is not None
                 else "not_initialized"
             ),
 
