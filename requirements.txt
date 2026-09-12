@@ -11,6 +11,7 @@ einops
 sentinelhub
 scikit-learn
 matplotlib
+python-multipart
 
 huggingface_hub
 

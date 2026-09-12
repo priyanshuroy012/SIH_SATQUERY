@@ -1,517 +1,224 @@
-from fastapi import (
-    APIRouter,
-    HTTPException,
-    Request
-)
+import os
+import tempfile
 
-from app.schemas.request_response import (
-    ChangeDetectionRequest,
-    ChangeDetectionResponse,
-    Location,
-    ImageDates
-)
-
+from fastapi import APIRouter, File, UploadFile, Request, HTTPException
 
 router = APIRouter()
 
 
-# =========================================================
-# Health
-# =========================================================
-
-@router.get("/health")
-def health(request: Request):
-
-    colab_bit_service = getattr(
-        request.app.state,
-        "colab_bit_service",
-        None
-    )
-
-    satellite_service = getattr(
-        request.app.state,
-        "satellite_service",
-        None
-    )
-
-    change_analyzer = getattr(
-        request.app.state,
-        "change_analyzer",
-        None
-    )
-
-    explanation_service = getattr(
-        request.app.state,
-        "explanation_service",
-        None
-    )
-
-    startup_error = getattr(
-        request.app.state,
-        "startup_error",
-        None
-    )
-
-    all_services_ready = all([
-        satellite_service is not None,
-        colab_bit_service is not None,
-        change_analyzer is not None,
-        explanation_service is not None
-    ])
-
-    status = (
-        "healthy"
-        if all_services_ready and startup_error is None
-        else "unhealthy"
-    )
-
-    return {
-
-        "status": status,
-
-        "service": "SATQuery Model 2",
-
-        "inference": "Google Colab",
-
-        "services": {
-
-            "satellite": (
-                "initialized"
-                if satellite_service is not None
-                else "not_initialized"
-            ),
-
-            "colab_bit": (
-                "initialized"
-                if colab_bit_service is not None
-                else "not_initialized"
-            ),
-
-            "change_analyzer": (
-                "initialized"
-                if change_analyzer is not None
-                else "not_initialized"
-            ),
-
-            "explanation": (
-                "initialized"
-                if explanation_service is not None
-                else "not_initialized"
-            )
-        },
-
-        "startup_error": startup_error
-    }
-
-
-# =========================================================
-# Detect Change
-# =========================================================
-
-@router.post(
-    "/detect-change",
-    response_model=ChangeDetectionResponse
-)
-def detect_change(
-
+@router.post("/detect-change")
+async def detect_change(
     request: Request,
-
-    data: ChangeDetectionRequest
-
+    before_image: UploadFile = File(...),
+    after_image: UploadFile = File(...)
 ):
 
-    # -----------------------------------------------------
-    # Get services initialized by main.py
-    # -----------------------------------------------------
+    # -----------------------------------------
+    # Validate file types
+    # -----------------------------------------
 
-    satellite_service = getattr(
-        request.app.state,
-        "satellite_service",
-        None
-    )
+    allowed_types = {
+        "image/png",
+        "image/jpeg",
+        "image/jpg"
+    }
 
-    colab_bit_service = getattr(
-        request.app.state,
-        "colab_bit_service",
-        None
-    )
-
-    change_analyzer = getattr(
-        request.app.state,
-        "change_analyzer",
-        None
-    )
-
-    explanation_service = getattr(
-        request.app.state,
-        "explanation_service",
-        None
-    )
-
-
-    # -----------------------------------------------------
-    # Validate services
-    # -----------------------------------------------------
-
-    if satellite_service is None:
-
+    if before_image.content_type not in allowed_types:
         raise HTTPException(
-            status_code=500,
-            detail=(
-                "Satellite service not initialized."
-            )
+            status_code=400,
+            detail="before_image must be PNG or JPEG."
         )
 
+    if after_image.content_type not in allowed_types:
+        raise HTTPException(
+            status_code=400,
+            detail="after_image must be PNG or JPEG."
+        )
+
+    # -----------------------------------------
+    # Get services
+    # -----------------------------------------
+
+    colab_bit_service = request.app.state.colab_bit_service
+    change_analyzer = request.app.state.change_analyzer
+    explanation_service = request.app.state.explanation_service
 
     if colab_bit_service is None:
-
         raise HTTPException(
-            status_code=500,
-            detail=(
-                "Colab BIT service not initialized."
-            )
+            status_code=503,
+            detail="Colab BIT service is unavailable."
         )
 
+    # -----------------------------------------
+    # Read uploaded images
+    # -----------------------------------------
 
-    if change_analyzer is None:
+    before_data = await before_image.read()
+    after_data = await after_image.read()
 
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Change analyzer not initialized."
-            )
-        )
+    before_path = tempfile.mktemp(
+        suffix=".png"
+    )
 
-
-    if explanation_service is None:
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Explanation service not initialized."
-            )
-        )
-
+    after_path = tempfile.mktemp(
+        suffix=".png"
+    )
 
     try:
 
-        # =================================================
-        # 1. Retrieve satellite imagery
-        # =================================================
+        # -----------------------------------------
+        # Save temporary files
+        # -----------------------------------------
 
-        print(
-            "Retrieving satellite imagery..."
+        with open(before_path, "wb") as f:
+            f.write(before_data)
+
+        with open(after_path, "wb") as f:
+            f.write(after_data)
+
+        # -----------------------------------------
+        # Send images to Colab BIT
+        # -----------------------------------------
+
+        prediction = colab_bit_service.detect(
+            before_path,
+            after_path
         )
 
-        satellite_result = (
-            satellite_service.get_images(
-
-                latitude=data.latitude,
-
-                longitude=data.longitude,
-
-                before_date=data.before_date,
-
-                after_date=data.after_date,
-
-                max_cloud_cover=(
-                    data.max_cloud_cover
-                )
-            )
-        )
-
-
-        # =================================================
-        # 2. Send images to Colab BIT API
-        # =================================================
-
-        print(
-            "Sending satellite images to "
-            "Colab BIT inference..."
-        )
-
-        prediction = (
-            colab_bit_service.detect(
-
-                before_path=(
-                    satellite_result[
-                        "before_image"
-                    ]
-                ),
-
-                after_path=(
-                    satellite_result[
-                        "after_image"
-                    ]
-                )
-            )
-        )
-
-
-        print(
-            "Colab BIT inference completed."
-        )
-
-
-        # =================================================
-        # 3. Extract BIT change statistics
-        # =================================================
+        # -----------------------------------------
+        # Extract change detection result
+        # -----------------------------------------
 
         change_detection = prediction.get(
             "change_detection",
             {}
         )
 
-        changed_pixels = change_detection.get(
-            "changed_pixels",
-            0
-        )
-
-        total_pixels = change_detection.get(
-            "total_pixels",
-            0
-        )
-
-        change_percentage = change_detection.get(
-            "change_percentage",
-            0
-        )
-
-        change_detected = change_detection.get(
-            "change_detected",
-            False
-        )
-
-        image_size = change_detection.get(
-            "image_size",
-            [1024, 1024]
-        )
-
-
-        # =================================================
-        # 4. Extract visualizations from Colab
-        # =================================================
-        #
-        # Colab now returns:
-        #
-        # visualizations:
-        #     mask
-        #     overlay
-        #
-        # Both are Base64 encoded PNG images.
-        #
-        # =================================================
-
         visualizations = prediction.get(
             "visualizations",
             {}
         )
 
-        mask_base64 = visualizations.get(
-            "mask"
+        # -----------------------------------------
+        # Statistics
+        # -----------------------------------------
+
+        change_percentage = float(
+            change_detection.get(
+                "change_percentage",
+                0
+            )
         )
 
-        overlay_base64 = visualizations.get(
-            "overlay"
+        changed_pixels = int(
+            change_detection.get(
+                "changed_pixels",
+                0
+            )
         )
 
+        total_pixels = int(
+            change_detection.get(
+                "total_pixels",
+                0
+            )
+        )
 
-        # =================================================
-        # 5. Determine severity
-        # =================================================
+        change_detected = bool(
+            change_detection.get(
+                "change_detected",
+                False
+            )
+        )
 
-        if change_percentage <= 0:
+        # -----------------------------------------
+        # Severity
+        # -----------------------------------------
 
+        if change_percentage == 0:
             severity = "none"
 
         elif change_percentage < 1:
-
             severity = "low"
 
         elif change_percentage < 5:
-
             severity = "moderate"
 
         elif change_percentage < 15:
-
             severity = "high"
 
         else:
-
             severity = "very_high"
 
+        # -----------------------------------------
+        # Spatial analysis
+        # -----------------------------------------
 
-        # =================================================
-        # 6. Build spatial analysis
-        # =================================================
-        #
-        # At the moment Colab returns the complete mask
-        # as a visualization, but not as a numerical array.
-        #
-        # Therefore actual connected-component analysis
-        # is not performed here.
-        #
-        # =================================================
-
-        analysis = {
-
-            "changed_pixels": (
-                changed_pixels
-            ),
-
-            "total_pixels": (
-                total_pixels
-            ),
-
-            "change_percentage": (
-                change_percentage
-            ),
-
-            "change_detected": (
-                change_detected
-            ),
+        spatial_analysis = {
+            "changed_pixels": changed_pixels,
+            "total_pixels": total_pixels,
+            "change_percentage": change_percentage,
+            "change_detected": change_detected,
 
             "number_of_regions": None,
-
             "largest_region_pixels": None,
 
             "centroid": None,
-
             "bounding_box": None,
-
             "dominant_region": None,
 
             "severity": severity,
 
-            "image_size": image_size,
-
-            "note": (
-                "The BIT inference service returns "
-                "the reconstructed change mask and "
-                "overlay as Base64 images. Detailed "
-                "connected-region statistics are not "
-                "currently calculated by the Render API."
+            "image_size": change_detection.get(
+                "image_size",
+                [1024, 1024]
             )
         }
 
+        # -----------------------------------------
+        # Explanation
+        # -----------------------------------------
 
-        # =================================================
-        # 7. Generate explanation
-        # =================================================
-
-        print(
-            "Generating explanation..."
+        explanation = explanation_service.generate(
+            change_detection=change_detection,
+            spatial_analysis=spatial_analysis
         )
 
-        explanation = (
-            explanation_service.generate(
+        # -----------------------------------------
+        # Final response
+        # -----------------------------------------
 
-                analysis=analysis,
+        return {
+            "status": "success",
 
-                before_date=(
-                    data.before_date.isoformat()
-                ),
-
-                after_date=(
-                    data.after_date.isoformat()
-                )
-            )
-        )
-
-
-        # =================================================
-        # 8. Build final API response
-        # =================================================
-
-        return ChangeDetectionResponse(
-
-            status="success",
-
-            location=Location(
-
-                latitude=data.latitude,
-
-                longitude=data.longitude
-            ),
-
-            dates=ImageDates(
-
-                requested_before=(
-                    data.before_date.isoformat()
-                ),
-
-                requested_after=(
-                    data.after_date.isoformat()
-                ),
-
-                actual_before=(
-                    satellite_result.get(
-                        "actual_before_date"
-                    )
-                ),
-
-                actual_after=(
-                    satellite_result.get(
-                        "actual_after_date"
-                    )
-                )
-            ),
-
-            change_detection={
-
-                "change_detected": (
-                    change_detected
-                ),
-
-                "change_percentage": (
-                    change_percentage
-                ),
-
-                "changed_pixels": (
-                    changed_pixels
-                ),
-
-                "total_pixels": (
-                    total_pixels
-                ),
-
-                "image_size": (
-                    image_size
-                )
+            "input": {
+                "before_filename": before_image.filename,
+                "after_filename": after_image.filename
             },
 
-            spatial_analysis=analysis,
+            "change_detection": change_detection,
 
-            explanation=explanation,
+            "spatial_analysis": spatial_analysis,
 
-            visualizations={
+            "visualizations": {
+                "mask": visualizations.get("mask"),
+                "overlay": visualizations.get("overlay")
+            },
 
-                "mask": mask_base64,
-
-                "overlay": overlay_base64
-
-            }
-        )
-
-
-    except HTTPException:
-
-        raise
-
+            "explanation": explanation
+        }
 
     except Exception as e:
 
-        print(
-            "ERROR during change detection:"
-        )
-
-        print(
-            repr(e)
-        )
-
         raise HTTPException(
-
             status_code=500,
-
-            detail=str(e)
+            detail=f"Change detection failed: {str(e)}"
         )
+
+    finally:
+
+        if os.path.exists(before_path):
+            os.remove(before_path)
+
+        if os.path.exists(after_path):
+            os.remove(after_path)
