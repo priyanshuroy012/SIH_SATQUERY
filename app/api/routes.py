@@ -39,8 +39,11 @@ def health(request: Request):
     )
 
     return {
+
         "status": "healthy",
+
         "service": "SATQuery Model 2",
+
         "input_mode": "image_upload",
 
         "services": {
@@ -81,13 +84,19 @@ async def detect_change(
 
 ):
 
-    # =====================================================
+    # -----------------------------------------------------
     # Get services initialized by main.py
-    # =====================================================
+    # -----------------------------------------------------
 
     colab_bit_service = getattr(
         request.app.state,
         "colab_bit_service",
+        None
+    )
+
+    change_analyzer = getattr(
+        request.app.state,
+        "change_analyzer",
         None
     )
 
@@ -97,9 +106,10 @@ async def detect_change(
         None
     )
 
-    # =====================================================
+
+    # -----------------------------------------------------
     # Validate services
-    # =====================================================
+    # -----------------------------------------------------
 
     if colab_bit_service is None:
 
@@ -108,6 +118,15 @@ async def detect_change(
             detail="Colab BIT service is unavailable."
         )
 
+
+    if change_analyzer is None:
+
+        raise HTTPException(
+            status_code=500,
+            detail="Change analyzer not initialized."
+        )
+
+
     if explanation_service is None:
 
         raise HTTPException(
@@ -115,15 +134,17 @@ async def detect_change(
             detail="Explanation service not initialized."
         )
 
-    # =====================================================
+
+    # -----------------------------------------------------
     # Validate uploaded files
-    # =====================================================
+    # -----------------------------------------------------
 
     allowed_types = {
         "image/png",
         "image/jpeg",
         "image/jpg"
     }
+
 
     if before_image.content_type not in allowed_types:
 
@@ -134,6 +155,7 @@ async def detect_change(
             )
         )
 
+
     if after_image.content_type not in allowed_types:
 
         raise HTTPException(
@@ -143,13 +165,15 @@ async def detect_change(
             )
         )
 
+
     before_path = None
     after_path = None
+
 
     try:
 
         # =================================================
-        # 1. Log request
+        # 1. Read uploaded images
         # =================================================
 
         print("\n" + "=" * 60)
@@ -170,13 +194,11 @@ async def detect_change(
             after_image.filename
         )
 
-        # =================================================
-        # 2. Read uploaded images
-        # =================================================
 
         before_data = await before_image.read()
 
         after_data = await after_image.read()
+
 
         if not before_data:
 
@@ -185,6 +207,7 @@ async def detect_change(
                 detail="before_image is empty."
             )
 
+
         if not after_data:
 
             raise HTTPException(
@@ -192,8 +215,9 @@ async def detect_change(
                 detail="after_image is empty."
             )
 
+
         # =================================================
-        # 3. Save temporary files
+        # 2. Save temporary files
         # =================================================
 
         with tempfile.NamedTemporaryFile(
@@ -205,6 +229,7 @@ async def detect_change(
 
             before_path = before_file.name
 
+
         with tempfile.NamedTemporaryFile(
             suffix=".png",
             delete=False
@@ -213,6 +238,7 @@ async def detect_change(
             after_file.write(after_data)
 
             after_path = after_file.name
+
 
         print(
             "Temporary before image:",
@@ -224,32 +250,38 @@ async def detect_change(
             after_path
         )
 
+
         # =================================================
-        # 4. Send images to Colab BIT
+        # 3. Run BIT on Colab GPU
         # =================================================
 
         print(
-            "\nRunning BIT change detection on Colab..."
+            "\nRunning BIT change detection..."
         )
+
 
         prediction = colab_bit_service.detect(
 
             before_path=before_path,
 
             after_path=after_path
+
         )
+
 
         print(
             "BIT prediction received."
         )
+
 
         print(
             "BIT response keys:",
             prediction.keys()
         )
 
+
         # =================================================
-        # 5. Extract change detection results
+        # 4. Extract BIT change detection results
         # =================================================
 
         change_detection = prediction.get(
@@ -257,85 +289,116 @@ async def detect_change(
             {}
         )
 
-        # =================================================
-        # 6. Extract spatial analysis
-        #
-        # IMPORTANT:
-        # Spatial analysis is now calculated inside Colab.
-        # We no longer create placeholder values here.
-        # =================================================
 
-        spatial_analysis = prediction.get(
-            "spatial_analysis"
+        # -------------------------------------------------
+        # Check whether Colab returned a mask
+        # -------------------------------------------------
+
+        change_mask = prediction.get(
+            "change_mask"
         )
 
-        if spatial_analysis is None:
 
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Colab BIT service did not return "
-                    "'spatial_analysis'. "
-                    "Make sure the updated Colab endpoint "
-                    "is running."
-                )
-            )
+        # =================================================
+        # 5. Spatial analysis
+        # =================================================
 
         print(
-            "\nSpatial analysis received:"
+            "\nRunning spatial analysis..."
         )
 
-        print(
-            spatial_analysis
-        )
 
-        # =================================================
-        # 7. Validate spatial analysis
-        # =================================================
+        if change_mask is not None:
 
-        required_analysis_keys = [
-            "change_percentage",
-            "severity",
-            "dominant_region",
-            "number_of_regions",
-            "largest_region_pixels"
-        ]
-
-        missing_keys = [
-            key
-            for key in required_analysis_keys
-            if key not in spatial_analysis
-        ]
-
-        if missing_keys:
-
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Colab spatial analysis is incomplete. "
-                    f"Missing keys: {missing_keys}"
-                )
+            analysis = change_analyzer.analyze(
+                change_mask
             )
 
+        else:
+
+            # ------------------------------------------------
+            # Colab currently returns statistics + visualizations
+            # rather than the numerical mask itself.
+            #
+            # Build the minimum analysis dictionary required
+            # by ExplanationService.
+            # ------------------------------------------------
+
+            change_percentage = change_detection.get(
+                "change_percentage",
+                0
+            )
+
+
+            # Determine severity
+
+            if change_percentage == 0:
+
+                severity = "none"
+
+            elif change_percentage < 2:
+
+                severity = "low"
+
+            elif change_percentage < 10:
+
+                severity = "moderate"
+
+            elif change_percentage < 25:
+
+                severity = "high"
+
+            else:
+
+                severity = "very high"
+
+
+            analysis = {
+
+                "change_percentage": (
+                    change_percentage
+                ),
+
+                "severity": severity,
+
+                "dominant_region": None,
+
+                "number_of_regions": 0,
+
+                "largest_region_pixels": 0
+
+            }
+
+
+        print(
+            "Spatial analysis:",
+            analysis
+        )
+
+
         # =================================================
-        # 8. Generate explanation
+        # 6. Generate explanation
         # =================================================
 
         print(
             "\nGenerating explanation..."
         )
 
+
         explanation = explanation_service.generate(
 
-            analysis=spatial_analysis
+            analysis=analysis
+
         )
+
 
         print(
             "Explanation generated."
         )
 
+
         # =================================================
-        # 9. Get visualizations
+        # 7. Get visualizations
         # =================================================
 
         visualizations = prediction.get(
@@ -343,56 +406,9 @@ async def detect_change(
             {}
         )
 
-        mask_base64 = visualizations.get(
-            "mask"
-        )
-
-        overlay_base64 = visualizations.get(
-            "overlay"
-        )
 
         # =================================================
-        # 10. Warn if visualizations are missing
-        # =================================================
-
-        if not mask_base64:
-
-            print(
-                "WARNING: Colab did not return "
-                "a Base64 mask."
-            )
-
-        else:
-
-            print(
-                "Mask received."
-            )
-
-            print(
-                "Mask Base64 length:",
-                len(mask_base64)
-            )
-
-        if not overlay_base64:
-
-            print(
-                "WARNING: Colab did not return "
-                "a Base64 overlay."
-            )
-
-        else:
-
-            print(
-                "Overlay received."
-            )
-
-            print(
-                "Overlay Base64 length:",
-                len(overlay_base64)
-            )
-
-        # =================================================
-        # 11. Build final response
+        # 8. Build final response
         # =================================================
 
         response = {
@@ -408,11 +424,9 @@ async def detect_change(
                 "after_filename": (
                     after_image.filename
                 )
+
             },
 
-            # -------------------------------------------------
-            # BIT change detection
-            # -------------------------------------------------
 
             "change_detection": {
 
@@ -426,10 +440,7 @@ async def detect_change(
                 "change_percentage": (
                     change_detection.get(
                         "change_percentage",
-                        spatial_analysis.get(
-                            "change_percentage",
-                            0
-                        )
+                        0
                     )
                 ),
 
@@ -452,66 +463,30 @@ async def detect_change(
                         "image_size"
                     )
                 )
+
             },
 
-            # -------------------------------------------------
-            # Spatial analysis calculated by Colab
-            # -------------------------------------------------
 
-            "spatial_analysis": {
+            "spatial_analysis": analysis,
 
-                "change_percentage": (
-                    spatial_analysis[
-                        "change_percentage"
-                    ]
-                ),
-
-                "severity": (
-                    spatial_analysis[
-                        "severity"
-                    ]
-                ),
-
-                "dominant_region": (
-                    spatial_analysis[
-                        "dominant_region"
-                    ]
-                ),
-
-                "number_of_regions": (
-                    spatial_analysis[
-                        "number_of_regions"
-                    ]
-                ),
-
-                "largest_region_pixels": (
-                    spatial_analysis[
-                        "largest_region_pixels"
-                    ]
-                )
-            },
-
-            # -------------------------------------------------
-            # Base64 visualizations
-            # -------------------------------------------------
 
             "visualizations": {
 
-                "mask": mask_base64,
+                "mask": visualizations.get(
+                    "mask"
+                ),
 
-                "overlay": overlay_base64
+                "overlay": visualizations.get(
+                    "overlay"
+                )
+
             },
 
-            # -------------------------------------------------
-            # Human-readable explanation
-            # -------------------------------------------------
 
             "explanation": explanation
+
         }
 
-        # =================================================
-        # 12. Finished
-        # =================================================
 
         print(
             "\nChange detection completed successfully."
@@ -519,19 +494,14 @@ async def detect_change(
 
         print("=" * 60 + "\n")
 
+
         return response
 
-    # =====================================================
-    # HTTP exceptions
-    # =====================================================
 
     except HTTPException:
 
         raise
 
-    # =====================================================
-    # Unexpected errors
-    # =====================================================
 
     except Exception as e:
 
@@ -547,6 +517,7 @@ async def detect_change(
             str(e)
         )
 
+
         raise HTTPException(
 
             status_code=500,
@@ -555,13 +526,15 @@ async def detect_change(
                 "Change detection failed: "
                 f"{type(e).__name__}: {str(e)}"
             )
+
         )
 
-    # =====================================================
-    # Cleanup
-    # =====================================================
 
     finally:
+
+        # =================================================
+        # Cleanup temporary files
+        # =================================================
 
         if (
             before_path is not None
@@ -569,6 +542,7 @@ async def detect_change(
         ):
 
             os.remove(before_path)
+
 
         if (
             after_path is not None
