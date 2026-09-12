@@ -22,6 +22,10 @@ from app.services.explanation_service import (
     ExplanationService
 )
 
+from app.utils.checkpoint import (
+    get_bit_checkpoint
+)
+
 
 # =========================================================
 # Project paths
@@ -29,26 +33,20 @@ from app.services.explanation_service import (
 
 # Project root:
 #
-# SIH/
+# SATQuery-Model2/
 # ├── BIT_CD/
 # ├── app/
-# └── venv/
+# ├── models/
+# └── ...
 #
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(
+    __file__
+).resolve().parent.parent
 
 
 # BIT repository
 BIT_REPO_PATH = (
     BASE_DIR / "BIT_CD"
-)
-
-
-# BIT pretrained checkpoint
-BIT_CHECKPOINT_PATH = (
-    BIT_REPO_PATH
-    / "checkpoints"
-    / "BIT_LEVIR"
-    / "best_ckpt.pt"
 )
 
 
@@ -63,6 +61,16 @@ async def lifespan(app: FastAPI):
     print("Starting SATQuery Model 2 API")
     print("=" * 60)
 
+    # -----------------------------------------------------
+    # Default state
+    # -----------------------------------------------------
+
+    app.state.startup_error = None
+
+    app.state.satellite_service = None
+    app.state.bit_service = None
+    app.state.change_analyzer = None
+    app.state.explanation_service = None
 
     try:
 
@@ -71,7 +79,8 @@ async def lifespan(app: FastAPI):
         # =================================================
 
         print(
-            f"BIT repository:\n{BIT_REPO_PATH}"
+            f"BIT repository:\n"
+            f"{BIT_REPO_PATH}"
         )
 
         if not BIT_REPO_PATH.exists():
@@ -81,22 +90,41 @@ async def lifespan(app: FastAPI):
                 f"{BIT_REPO_PATH}"
             )
 
+        print(
+            "BIT repository found."
+        )
+
 
         # =================================================
-        # 2. Check BIT checkpoint
+        # 2. Download / locate BIT checkpoint
         # =================================================
 
         print(
-            f"BIT checkpoint:\n"
-            f"{BIT_CHECKPOINT_PATH}"
+            "Preparing BIT checkpoint..."
         )
 
-        if not BIT_CHECKPOINT_PATH.exists():
+        bit_checkpoint_path = (
+            get_bit_checkpoint()
+        )
+
+        print(
+            f"BIT checkpoint:\n"
+            f"{bit_checkpoint_path}"
+        )
+
+        if not Path(
+            bit_checkpoint_path
+        ).exists():
 
             raise FileNotFoundError(
-                "BIT checkpoint not found at:\n"
-                f"{BIT_CHECKPOINT_PATH}"
+                "BIT checkpoint could not be found "
+                "after download:\n"
+                f"{bit_checkpoint_path}"
             )
+
+        print(
+            "BIT checkpoint ready."
+        )
 
 
         # =================================================
@@ -130,12 +158,12 @@ async def lifespan(app: FastAPI):
 
         bit_service = BITService(
 
-            checkpoint_path=str(
-                BIT_CHECKPOINT_PATH
+            checkpoint_path=(
+                str(bit_checkpoint_path)
             ),
 
-            bit_repo_path=str(
-                BIT_REPO_PATH
+            bit_repo_path=(
+                str(BIT_REPO_PATH)
             ),
 
             patch_size=256,
@@ -201,37 +229,41 @@ async def lifespan(app: FastAPI):
         # =================================================
 
         print("=" * 60)
+
         print(
             "SATQuery Model 2 initialized successfully."
         )
+
         print("=" * 60)
 
 
     except Exception as e:
 
+        # =================================================
+        # Startup failure
+        # =================================================
+
         print("=" * 60)
+
         print(
             "ERROR: SATQuery Model 2 failed to initialize."
         )
+
         print("=" * 60)
 
         print(
             f"{type(e).__name__}: {e}"
         )
 
-        # Keep the actual error available to the API
-        app.state.startup_error = str(e)
-
-        # Set services to None so /health can report
-        # what failed.
-
-        app.state.satellite_service = None
-        app.state.bit_service = None
-        app.state.change_analyzer = None
-        app.state.explanation_service = None
+        app.state.startup_error = (
+            f"{type(e).__name__}: {e}"
+        )
 
 
+    # -----------------------------------------------------
     # Keep application running
+    # -----------------------------------------------------
+
     yield
 
 
@@ -240,7 +272,11 @@ async def lifespan(app: FastAPI):
     # =====================================================
 
     print("=" * 60)
-    print("Shutting down SATQuery Model 2 API...")
+
+    print(
+        "Shutting down SATQuery Model 2 API..."
+    )
+
     print("=" * 60)
 
 
@@ -320,45 +356,64 @@ def root():
 def health_check():
 
     bit_service = getattr(
-
         app.state,
-
         "bit_service",
-
         None
     )
 
     satellite_service = getattr(
-
         app.state,
-
         "satellite_service",
-
         None
     )
 
     change_analyzer = getattr(
-
         app.state,
-
         "change_analyzer",
-
         None
     )
 
     explanation_service = getattr(
-
         app.state,
-
         "explanation_service",
+        None
+    )
 
+    startup_error = getattr(
+        app.state,
+        "startup_error",
         None
     )
 
 
+    # -----------------------------------------------------
+    # Determine actual health
+    # -----------------------------------------------------
+
+    all_services_ready = all([
+
+        satellite_service is not None,
+
+        bit_service is not None,
+
+        change_analyzer is not None,
+
+        explanation_service is not None
+    ])
+
+
+    if all_services_ready and startup_error is None:
+
+        status = "healthy"
+
+    else:
+
+        status = "unhealthy"
+
+
     return {
 
-        "status": "healthy",
+        "status": status,
 
         "service": "SATQuery Model 2",
 
@@ -389,9 +444,5 @@ def health_check():
             )
         },
 
-        "startup_error": getattr(
-            app.state,
-            "startup_error",
-            None
-        )
+        "startup_error": startup_error
     }
