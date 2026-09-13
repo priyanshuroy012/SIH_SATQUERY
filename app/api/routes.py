@@ -6,8 +6,9 @@ from fastapi import (
     File
 )
 
-import os
-import tempfile
+from app.services.explanation_service import (
+    ExplanationService
+)
 
 
 router = APIRouter()
@@ -26,35 +27,42 @@ def health(request: Request):
         None
     )
 
-    change_analyzer = getattr(
-        request.app.state,
-        "change_analyzer",
-        None
-    )
-
     explanation_service = getattr(
         request.app.state,
         "explanation_service",
         None
     )
 
+    startup_error = getattr(
+        request.app.state,
+        "startup_error",
+        None
+    )
+
+    all_services_ready = (
+        colab_bit_service is not None
+        and explanation_service is not None
+        and startup_error is None
+    )
+
     return {
-        "status": "healthy",
+
+        "status": (
+            "healthy"
+            if all_services_ready
+            else "unhealthy"
+        ),
+
         "service": "SATQuery Model 2",
-        "input_mode": "image_upload",
+
+        "bit_backend": "Google Colab",
 
         "services": {
 
             "colab_bit": (
-                "initialized"
+                "connected"
                 if colab_bit_service is not None
-                else "not_initialized"
-            ),
-
-            "change_analyzer": (
-                "initialized"
-                if change_analyzer is not None
-                else "not_initialized"
+                else "not_connected"
             ),
 
             "explanation": (
@@ -62,7 +70,9 @@ def health(request: Request):
                 if explanation_service is not None
                 else "not_initialized"
             )
-        }
+        },
+
+        "startup_error": startup_error
     }
 
 
@@ -81,9 +91,9 @@ async def detect_change(
 
 ):
 
-    # =====================================================
-    # Get services initialized by main.py
-    # =====================================================
+    # -----------------------------------------------------
+    # Get Colab BIT service
+    # -----------------------------------------------------
 
     colab_bit_service = getattr(
         request.app.state,
@@ -97,305 +107,234 @@ async def detect_change(
         None
     )
 
-    # =====================================================
+
+    # -----------------------------------------------------
     # Validate services
-    # =====================================================
+    # -----------------------------------------------------
 
     if colab_bit_service is None:
 
         raise HTTPException(
-            status_code=503,
-            detail="Colab BIT service is unavailable."
+            status_code=500,
+            detail=(
+                "Colab BIT service is not initialized."
+            )
         )
+
 
     if explanation_service is None:
 
         raise HTTPException(
             status_code=500,
-            detail="Explanation service not initialized."
+            detail=(
+                "Explanation service is not initialized."
+            )
         )
 
-    # =====================================================
-    # Validate uploaded files
-    # =====================================================
+
+    # -----------------------------------------------------
+    # Validate file types
+    # -----------------------------------------------------
 
     allowed_types = {
+
         "image/png",
+
         "image/jpeg",
+
         "image/jpg"
     }
+
 
     if before_image.content_type not in allowed_types:
 
         raise HTTPException(
+
             status_code=400,
+
             detail=(
-                "before_image must be a PNG or JPEG image."
+                "Invalid before image format. "
+                "Use PNG or JPEG."
             )
         )
+
 
     if after_image.content_type not in allowed_types:
 
         raise HTTPException(
+
             status_code=400,
+
             detail=(
-                "after_image must be a PNG or JPEG image."
+                "Invalid after image format. "
+                "Use PNG or JPEG."
             )
         )
+
 
     before_path = None
     after_path = None
 
+
     try:
 
         # =================================================
-        # 1. Log request
+        # 1. Save uploaded images temporarily
         # =================================================
 
-        print("\n" + "=" * 60)
+        import tempfile
+        import os
 
-        print(
-            "SATQUERY MODEL 2 - IMAGE CHANGE DETECTION"
+
+        before_suffix = (
+            ".png"
+            if before_image.content_type == "image/png"
+            else ".jpg"
         )
 
-        print("=" * 60)
-
-        print(
-            "Before image:",
-            before_image.filename
+        after_suffix = (
+            ".png"
+            if after_image.content_type == "image/png"
+            else ".jpg"
         )
 
-        print(
-            "After image :",
-            after_image.filename
+
+        before_temp = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=before_suffix
         )
+
+        after_temp = tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=after_suffix
+        )
+
+
+        before_path = before_temp.name
+        after_path = after_temp.name
+
+
+        # -------------------------------------------------
+        # Write before image
+        # -------------------------------------------------
+
+        before_content = await before_image.read()
+
+        before_temp.write(
+            before_content
+        )
+
+        before_temp.close()
+
+
+        # -------------------------------------------------
+        # Write after image
+        # -------------------------------------------------
+
+        after_content = await after_image.read()
+
+        after_temp.write(
+            after_content
+        )
+
+        after_temp.close()
+
 
         # =================================================
-        # 2. Read uploaded images
+        # 2. Send images to Colab BIT API
         # =================================================
 
-        before_data = await before_image.read()
+        print(
+            "Sending image pair to Colab BIT API..."
+        )
 
-        after_data = await after_image.read()
 
-        if not before_data:
+        prediction = (
+            colab_bit_service.detect(
 
-            raise HTTPException(
-                status_code=400,
-                detail="before_image is empty."
+                before_path=before_path,
+
+                after_path=after_path
             )
+        )
 
-        if not after_data:
+
+        # =================================================
+        # 3. Extract Colab response
+        # =================================================
+
+        if not prediction:
 
             raise HTTPException(
-                status_code=400,
-                detail="after_image is empty."
-            )
 
-        # =================================================
-        # 3. Save temporary files
-        # =================================================
-
-        with tempfile.NamedTemporaryFile(
-            suffix=".png",
-            delete=False
-        ) as before_file:
-
-            before_file.write(before_data)
-
-            before_path = before_file.name
-
-        with tempfile.NamedTemporaryFile(
-            suffix=".png",
-            delete=False
-        ) as after_file:
-
-            after_file.write(after_data)
-
-            after_path = after_file.name
-
-        print(
-            "Temporary before image:",
-            before_path
-        )
-
-        print(
-            "Temporary after image:",
-            after_path
-        )
-
-        # =================================================
-        # 4. Send images to Colab BIT
-        # =================================================
-
-        print(
-            "\nRunning BIT change detection on Colab..."
-        )
-
-        prediction = colab_bit_service.detect(
-
-            before_path=before_path,
-
-            after_path=after_path
-        )
-
-        print(
-            "BIT prediction received."
-        )
-
-        print(
-            "BIT response keys:",
-            prediction.keys()
-        )
-
-        # =================================================
-        # 5. Extract change detection results
-        # =================================================
-
-        change_detection = prediction.get(
-            "change_detection",
-            {}
-        )
-
-        # =================================================
-        # 6. Extract spatial analysis
-        #
-        # IMPORTANT:
-        # Spatial analysis is now calculated inside Colab.
-        # We no longer create placeholder values here.
-        # =================================================
-
-        spatial_analysis = prediction.get(
-            "spatial_analysis"
-        )
-
-        if spatial_analysis is None:
-
-            raise HTTPException(
                 status_code=502,
+
                 detail=(
-                    "Colab BIT service did not return "
-                    "'spatial_analysis'. "
-                    "Make sure the updated Colab endpoint "
-                    "is running."
+                    "Colab BIT API returned "
+                    "an empty response."
                 )
             )
 
-        print(
-            "\nSpatial analysis received:"
-        )
 
-        print(
-            spatial_analysis
-        )
-
-        # =================================================
-        # 7. Validate spatial analysis
-        # =================================================
-
-        required_analysis_keys = [
-            "change_percentage",
-            "severity",
-            "dominant_region",
-            "number_of_regions",
-            "largest_region_pixels"
-        ]
-
-        missing_keys = [
-            key
-            for key in required_analysis_keys
-            if key not in spatial_analysis
-        ]
-
-        if missing_keys:
+        if prediction.get("status") != "success":
 
             raise HTTPException(
+
                 status_code=502,
+
                 detail=(
-                    "Colab spatial analysis is incomplete. "
-                    f"Missing keys: {missing_keys}"
+                    "Colab BIT API failed: "
+                    f"{prediction}"
                 )
             )
 
+
+        change_detection = (
+            prediction.get(
+                "change_detection",
+                {}
+            )
+        )
+
+
+        spatial_analysis = (
+            prediction.get(
+                "spatial_analysis",
+                {}
+            )
+        )
+
+
+        visualizations = (
+            prediction.get(
+                "visualizations",
+                {}
+            )
+        )
+
+
         # =================================================
-        # 8. Generate explanation
+        # 4. Generate explanation
         # =================================================
 
         print(
-            "\nGenerating explanation..."
+            "Generating change explanation..."
         )
 
-        explanation = explanation_service.generate(
 
-            analysis=spatial_analysis
+        explanation = (
+            explanation_service.generate(
+
+                analysis=spatial_analysis
+            )
         )
 
-        print(
-            "Explanation generated."
-        )
 
         # =================================================
-        # 9. Get visualizations
+        # 5. Build final response
         # =================================================
 
-        visualizations = prediction.get(
-            "visualizations",
-            {}
-        )
-
-        mask_base64 = visualizations.get(
-            "mask"
-        )
-
-        overlay_base64 = visualizations.get(
-            "overlay"
-        )
-
-        # =================================================
-        # 10. Warn if visualizations are missing
-        # =================================================
-
-        if not mask_base64:
-
-            print(
-                "WARNING: Colab did not return "
-                "a Base64 mask."
-            )
-
-        else:
-
-            print(
-                "Mask received."
-            )
-
-            print(
-                "Mask Base64 length:",
-                len(mask_base64)
-            )
-
-        if not overlay_base64:
-
-            print(
-                "WARNING: Colab did not return "
-                "a Base64 overlay."
-            )
-
-        else:
-
-            print(
-                "Overlay received."
-            )
-
-            print(
-                "Overlay Base64 length:",
-                len(overlay_base64)
-            )
-
-        # =================================================
-        # 11. Build final response
-        # =================================================
-
-        response = {
+        return {
 
             "status": "success",
 
@@ -410,9 +349,6 @@ async def detect_change(
                 )
             },
 
-            # -------------------------------------------------
-            # BIT change detection
-            # -------------------------------------------------
 
             "change_detection": {
 
@@ -426,10 +362,7 @@ async def detect_change(
                 "change_percentage": (
                     change_detection.get(
                         "change_percentage",
-                        spatial_analysis.get(
-                            "change_percentage",
-                            0
-                        )
+                        0
                     )
                 ),
 
@@ -449,130 +382,126 @@ async def detect_change(
 
                 "image_size": (
                     change_detection.get(
-                        "image_size"
+                        "image_size",
+                        []
                     )
                 )
             },
 
-            # -------------------------------------------------
-            # Spatial analysis calculated by Colab
-            # -------------------------------------------------
 
             "spatial_analysis": {
 
                 "change_percentage": (
-                    spatial_analysis[
-                        "change_percentage"
-                    ]
+                    spatial_analysis.get(
+                        "change_percentage",
+                        0
+                    )
                 ),
 
                 "severity": (
-                    spatial_analysis[
-                        "severity"
-                    ]
+                    spatial_analysis.get(
+                        "severity",
+                        "unknown"
+                    )
                 ),
 
                 "dominant_region": (
-                    spatial_analysis[
+                    spatial_analysis.get(
                         "dominant_region"
-                    ]
+                    )
                 ),
 
                 "number_of_regions": (
-                    spatial_analysis[
-                        "number_of_regions"
-                    ]
+                    spatial_analysis.get(
+                        "number_of_regions",
+                        0
+                    )
                 ),
 
                 "largest_region_pixels": (
-                    spatial_analysis[
-                        "largest_region_pixels"
-                    ]
+                    spatial_analysis.get(
+                        "largest_region_pixels",
+                        0
+                    )
                 )
             },
 
-            # -------------------------------------------------
-            # Base64 visualizations
-            # -------------------------------------------------
 
             "visualizations": {
 
-                "mask": mask_base64,
+                "mask": (
+                    visualizations.get(
+                        "mask"
+                    )
+                ),
 
-                "overlay": overlay_base64
+                "overlay": (
+                    visualizations.get(
+                        "overlay"
+                    )
+                )
             },
 
-            # -------------------------------------------------
-            # Human-readable explanation
-            # -------------------------------------------------
 
             "explanation": explanation
         }
 
-        # =================================================
-        # 12. Finished
-        # =================================================
-
-        print(
-            "\nChange detection completed successfully."
-        )
-
-        print("=" * 60 + "\n")
-
-        return response
-
-    # =====================================================
-    # HTTP exceptions
-    # =====================================================
 
     except HTTPException:
 
         raise
 
-    # =====================================================
-    # Unexpected errors
-    # =====================================================
 
     except Exception as e:
 
         print(
-            "\nERROR during change detection:"
+            "ERROR during change detection:"
         )
 
         print(
-            type(e).__name__
+            repr(e)
         )
 
-        print(
-            str(e)
-        )
 
         raise HTTPException(
 
             status_code=500,
 
-            detail=(
-                "Change detection failed: "
-                f"{type(e).__name__}: {str(e)}"
-            )
+            detail=str(e)
         )
 
-    # =====================================================
-    # Cleanup
-    # =====================================================
 
     finally:
 
-        if (
-            before_path is not None
-            and os.path.exists(before_path)
-        ):
+        # =================================================
+        # Cleanup temporary files
+        # =================================================
 
-            os.remove(before_path)
+        try:
 
-        if (
-            after_path is not None
-            and os.path.exists(after_path)
-        ):
+            if before_path and os.path.exists(
+                before_path
+            ):
 
-            os.remove(after_path)
+                os.remove(
+                    before_path
+                )
+
+
+            if after_path and os.path.exists(
+                after_path
+            ):
+
+                os.remove(
+                    after_path
+                )
+
+        except Exception as cleanup_error:
+
+            print(
+                "Temporary file cleanup failed:"
+            )
+
+            print(
+                repr(cleanup_error)
+            )

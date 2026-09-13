@@ -1,131 +1,337 @@
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
 
 from app.api.routes import router
-
 from app.services.colab_bit_service import ColabBITService
-from app.services.change_analysis import ChangeAnalyzer
 from app.services.explanation_service import ExplanationService
 
+
+# =========================================================
+# Load environment variables
+# =========================================================
+
+load_dotenv()
+
+
+# =========================================================
+# Application startup / shutdown
+# =========================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    print("Starting SATQuery Model 2...")
+    print("=" * 60)
+    print("Starting SATQuery Model 2 API")
+    print("=" * 60)
+
+    # -----------------------------------------------------
+    # Default state
+    # -----------------------------------------------------
+
+    app.state.startup_error = None
 
     app.state.colab_bit_service = None
-    app.state.change_analyzer = None
     app.state.explanation_service = None
-    app.state.startup_error = None
 
     try:
 
-        # -----------------------------------------
-        # Colab BIT
-        # -----------------------------------------
+        # =================================================
+        # 1. Check Colab BIT URL
+        # =================================================
 
-        print("Initializing Colab BIT Service...")
+        colab_url = os.getenv("COLAB_BIT_URL")
 
-        colab_bit_service = ColabBITService()
+        if not colab_url:
 
-        print("Checking Colab BIT health...")
+            raise RuntimeError(
+                "COLAB_BIT_URL is not configured."
+            )
 
-        health = colab_bit_service.health_check()
+        print(
+            "Colab BIT API:"
+        )
 
-        print("Colab BIT health:", health)
+        print(
+            colab_url
+        )
 
-        app.state.colab_bit_service = colab_bit_service
 
-        # -----------------------------------------
-        # Change Analyzer
-        # -----------------------------------------
+        # =================================================
+        # 2. Initialize Colab BIT Service
+        # =================================================
 
-        print("Initializing ChangeAnalyzer...")
+        print(
+            "Initializing ColabBITService..."
+        )
 
-        app.state.change_analyzer = ChangeAnalyzer()
+        colab_bit_service = (
+            ColabBITService()
+        )
 
-        # -----------------------------------------
-        # Explanation Service
-        # -----------------------------------------
+        app.state.colab_bit_service = (
+            colab_bit_service
+        )
 
-        print("Initializing ExplanationService...")
+        print(
+            "ColabBITService initialized."
+        )
 
-        app.state.explanation_service = ExplanationService()
 
-        print("SATQuery Model 2 initialized successfully.")
+        # =================================================
+        # 3. Check Colab BIT health
+        # =================================================
+
+        print(
+            "Checking Colab BIT API..."
+        )
+
+        health = (
+            colab_bit_service.health_check()
+        )
+
+        print(
+            f"Colab BIT health: {health}"
+        )
+
+
+        # =================================================
+        # 4. Initialize Explanation Service
+        # =================================================
+
+        print(
+            "Initializing ExplanationService..."
+        )
+
+        explanation_service = (
+            ExplanationService()
+        )
+
+        app.state.explanation_service = (
+            explanation_service
+        )
+
+        print(
+            "ExplanationService initialized."
+        )
+
+
+        # =================================================
+        # 5. Startup complete
+        # =================================================
+
+        print("=" * 60)
+
+        print(
+            "SATQuery Model 2 initialized successfully."
+        )
+
+        print(
+            "BIT inference is running on Colab."
+        )
+
+        print("=" * 60)
+
 
     except Exception as e:
 
-        app.state.startup_error = f"{type(e).__name__}: {str(e)}"
+        # =================================================
+        # Startup failure
+        # =================================================
 
-        print("STARTUP ERROR:")
-        print(app.state.startup_error)
+        print("=" * 60)
+
+        print(
+            "ERROR: SATQuery Model 2 failed to initialize."
+        )
+
+        print("=" * 60)
+
+        print(
+            f"{type(e).__name__}: {e}"
+        )
+
+        app.state.startup_error = (
+            f"{type(e).__name__}: {e}"
+        )
+
+
+    # -----------------------------------------------------
+    # Keep application running
+    # -----------------------------------------------------
 
     yield
 
-    print("SATQuery Model 2 shutting down...")
 
+    # =====================================================
+    # Shutdown
+    # =====================================================
+
+    print("=" * 60)
+
+    print(
+        "Shutting down SATQuery Model 2 API..."
+    )
+
+    print("=" * 60)
+
+
+# =========================================================
+# FastAPI application
+# =========================================================
 
 app = FastAPI(
-    title="SATQuery Model 2",
-    description="Image-based bitemporal satellite change detection using BIT",
-    version="2.0.0",
+
+    title="SATQuery Model 2 API",
+
+    description=(
+        "Satellite image change detection "
+        "using the BIT model running on "
+        "a remote Colab GPU."
+    ),
+
+    version="1.0.0",
+
     lifespan=lifespan
 )
 
 
+# =========================================================
+# CORS
+# =========================================================
+
 app.add_middleware(
+
     CORSMiddleware,
+
     allow_origins=["*"],
+
     allow_credentials=True,
+
     allow_methods=["*"],
-    allow_headers=["*"],
+
+    allow_headers=["*"]
 )
 
 
-app.include_router(router, prefix="/api")
+# =========================================================
+# API routes
+# =========================================================
 
+app.include_router(
+
+    router,
+
+    prefix="/api"
+)
+
+
+# =========================================================
+# Root endpoint
+# =========================================================
 
 @app.get("/")
 def root():
+
     return {
+
         "service": "SATQuery Model 2",
+
         "status": "running",
-        "input": "before_image + after_image"
+
+        "bit_backend": "Google Colab",
+
+        "message": (
+            "Satellite change detection API is running."
+        )
     }
 
 
-@app.get("/health")
-def health():
+# =========================================================
+# Health endpoint
+# =========================================================
 
-    ready = all([
-        app.state.colab_bit_service is not None,
-        app.state.change_analyzer is not None,
-        app.state.explanation_service is not None
-    ])
+@app.get("/health")
+def health_check():
+
+    colab_bit_service = getattr(
+        app.state,
+        "colab_bit_service",
+        None
+    )
+
+    explanation_service = getattr(
+        app.state,
+        "explanation_service",
+        None
+    )
+
+    startup_error = getattr(
+        app.state,
+        "startup_error",
+        None
+    )
+
+
+    # -----------------------------------------------------
+    # Determine service state
+    # -----------------------------------------------------
+
+    colab_ready = (
+        colab_bit_service is not None
+    )
+
+    explanation_ready = (
+        explanation_service is not None
+    )
+
+    all_services_ready = (
+        colab_ready
+        and explanation_ready
+    )
+
+
+    if (
+        all_services_ready
+        and startup_error is None
+    ):
+
+        status = "healthy"
+
+    else:
+
+        status = "unhealthy"
+
+
+    # -----------------------------------------------------
+    # Response
+    # -----------------------------------------------------
 
     return {
-        "status": "healthy" if ready else "unhealthy",
+
+        "status": status,
+
         "service": "SATQuery Model 2",
-        "input_mode": "image_upload",
+
+        "bit_backend": "Google Colab",
+
         "services": {
+
             "colab_bit": (
-                "initialized"
-                if app.state.colab_bit_service
-                else "not_initialized"
+                "connected"
+                if colab_ready
+                else "not_connected"
             ),
-            "change_analyzer": (
-                "initialized"
-                if app.state.change_analyzer
-                else "not_initialized"
-            ),
+
             "explanation": (
                 "initialized"
-                if app.state.explanation_service
+                if explanation_ready
                 else "not_initialized"
             )
         },
-        "startup_error": app.state.startup_error
+
+        "startup_error": startup_error
     }

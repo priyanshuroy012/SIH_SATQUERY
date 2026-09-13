@@ -5,10 +5,7 @@ import requests
 class ColabBITService:
 
     def __init__(self):
-
-        self.base_url = os.getenv(
-            "COLAB_BIT_URL"
-        )
+        self.base_url = os.getenv("COLAB_BIT_URL")
 
         if not self.base_url:
             raise RuntimeError(
@@ -21,13 +18,7 @@ class ColabBITService:
             f"{self.base_url}/detect-change"
         )
 
-        print(
-            f"Colab BIT endpoint: {self.endpoint}"
-        )
-
-
     def health_check(self):
-
         response = requests.get(
             f"{self.base_url}/health",
             timeout=30
@@ -37,29 +28,21 @@ class ColabBITService:
 
         return response.json()
 
-
     def detect(
         self,
         before_path: str,
         after_path: str
     ):
 
-        with open(
-            before_path,
-            "rb"
-        ) as before_file, open(
-            after_path,
-            "rb"
-        ) as after_file:
+        with open(before_path, "rb") as before_file, \
+             open(after_path, "rb") as after_file:
 
             files = {
-
                 "before_image": (
                     "before.png",
                     before_file,
                     "image/png"
                 ),
-
                 "after_image": (
                     "after.png",
                     after_file,
