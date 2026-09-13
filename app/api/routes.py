@@ -1,507 +1,217 @@
-from fastapi import (
-    APIRouter,
-    HTTPException,
-    Request,
-    UploadFile,
-    File
-)
-
-from app.services.explanation_service import (
-    ExplanationService
-)
-
+from fastapi import APIRouter, Request, UploadFile, File, HTTPException
+import os
+import tempfile
 
 router = APIRouter()
 
 
-# =========================================================
-# Health
-# =========================================================
-
 @router.get("/health")
 def health(request: Request):
+    try:
+        colab_service = request.app.state.colab_bit_service
+        colab_health = colab_service.health_check()
 
-    colab_bit_service = getattr(
-        request.app.state,
-        "colab_bit_service",
-        None
-    )
+        return {
+            "status": "ok",
+            "colab_bit": colab_health,
+            "explanation": "available"
+        }
 
-    explanation_service = getattr(
-        request.app.state,
-        "explanation_service",
-        None
-    )
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service health check failed: {str(e)}"
+        )
 
-    startup_error = getattr(
-        request.app.state,
-        "startup_error",
-        None
-    )
-
-    all_services_ready = (
-        colab_bit_service is not None
-        and explanation_service is not None
-        and startup_error is None
-    )
-
-    return {
-
-        "status": (
-            "healthy"
-            if all_services_ready
-            else "unhealthy"
-        ),
-
-        "service": "SATQuery Model 2",
-
-        "bit_backend": "Google Colab",
-
-        "services": {
-
-            "colab_bit": (
-                "connected"
-                if colab_bit_service is not None
-                else "not_connected"
-            ),
-
-            "explanation": (
-                "initialized"
-                if explanation_service is not None
-                else "not_initialized"
-            )
-        },
-
-        "startup_error": startup_error
-    }
-
-
-# =========================================================
-# Detect Change
-# =========================================================
 
 @router.post("/detect-change")
 async def detect_change(
-
     request: Request,
-
     before_image: UploadFile = File(...),
-
     after_image: UploadFile = File(...)
-
 ):
 
-    # -----------------------------------------------------
-    # Get Colab BIT service
-    # -----------------------------------------------------
-
-    colab_bit_service = getattr(
-        request.app.state,
-        "colab_bit_service",
-        None
-    )
-
-    explanation_service = getattr(
-        request.app.state,
-        "explanation_service",
-        None
-    )
-
-
-    # -----------------------------------------------------
-    # Validate services
-    # -----------------------------------------------------
-
-    if colab_bit_service is None:
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Colab BIT service is not initialized."
-            )
-        )
-
-
-    if explanation_service is None:
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Explanation service is not initialized."
-            )
-        )
-
-
-    # -----------------------------------------------------
+    # --------------------------------------------------
     # Validate file types
-    # -----------------------------------------------------
+    # --------------------------------------------------
 
     allowed_types = {
-
         "image/png",
-
         "image/jpeg",
-
         "image/jpg"
     }
 
-
     if before_image.content_type not in allowed_types:
-
         raise HTTPException(
-
             status_code=400,
-
-            detail=(
-                "Invalid before image format. "
-                "Use PNG or JPEG."
-            )
+            detail="before_image must be PNG or JPEG"
         )
-
 
     if after_image.content_type not in allowed_types:
-
         raise HTTPException(
-
             status_code=400,
-
-            detail=(
-                "Invalid after image format. "
-                "Use PNG or JPEG."
-            )
+            detail="after_image must be PNG or JPEG"
         )
-
 
     before_path = None
     after_path = None
 
-
     try:
 
-        # =================================================
-        # 1. Save uploaded images temporarily
-        # =================================================
+        # --------------------------------------------------
+        # Save uploaded images temporarily
+        # --------------------------------------------------
 
-        import tempfile
-        import os
+        before_suffix = ".png" if before_image.content_type == "image/png" else ".jpg"
+        after_suffix = ".png" if after_image.content_type == "image/png" else ".jpg"
 
-
-        before_suffix = (
-            ".png"
-            if before_image.content_type == "image/png"
-            else ".jpg"
-        )
-
-        after_suffix = (
-            ".png"
-            if after_image.content_type == "image/png"
-            else ".jpg"
-        )
-
-
-        before_temp = tempfile.NamedTemporaryFile(
+        with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=before_suffix
-        )
+        ) as before_temp:
 
-        after_temp = tempfile.NamedTemporaryFile(
+            before_temp.write(await before_image.read())
+            before_path = before_temp.name
+
+        with tempfile.NamedTemporaryFile(
             delete=False,
             suffix=after_suffix
+        ) as after_temp:
+
+            after_temp.write(await after_image.read())
+            after_path = after_temp.name
+
+        # --------------------------------------------------
+        # Get services
+        # --------------------------------------------------
+
+        colab_service = request.app.state.colab_bit_service
+        explanation_service = request.app.state.explanation_service
+
+        # --------------------------------------------------
+        # Send images to Colab BIT
+        # --------------------------------------------------
+
+        colab_result = colab_service.detect(
+            before_path,
+            after_path
         )
 
+        print("========== COLAB RESPONSE ==========")
+        print(colab_result)
+        print("====================================")
 
-        before_path = before_temp.name
-        after_path = after_temp.name
+        # --------------------------------------------------
+        # Extract response sections
+        # --------------------------------------------------
 
-
-        # -------------------------------------------------
-        # Write before image
-        # -------------------------------------------------
-
-        before_content = await before_image.read()
-
-        before_temp.write(
-            before_content
+        change_detection = colab_result.get(
+            "change_detection",
+            {}
         )
 
-        before_temp.close()
-
-
-        # -------------------------------------------------
-        # Write after image
-        # -------------------------------------------------
-
-        after_content = await after_image.read()
-
-        after_temp.write(
-            after_content
+        spatial_analysis = colab_result.get(
+            "spatial_analysis",
+            {}
         )
 
-        after_temp.close()
-
-
-        # =================================================
-        # 2. Send images to Colab BIT API
-        # =================================================
-
-        print(
-            "Sending image pair to Colab BIT API..."
+        visualizations = colab_result.get(
+            "visualizations",
+            {}
         )
 
+        # --------------------------------------------------
+        # Safety fallback
+        #
+        # If Colab did not return spatial_analysis,
+        # construct it from change_detection.
+        # --------------------------------------------------
 
-        prediction = (
-            colab_bit_service.detect(
+        if not spatial_analysis:
 
-                before_path=before_path,
+            spatial_analysis = {
+                "change_percentage": change_detection.get(
+                    "change_percentage",
+                    0
+                ),
+                "severity": "unknown",
+                "dominant_region": None,
+                "number_of_regions": 0,
+                "largest_region_pixels": 0
+            }
 
-                after_path=after_path
-            )
+        # --------------------------------------------------
+        # Make sure required fields exist
+        # --------------------------------------------------
+
+        spatial_analysis.setdefault(
+            "change_percentage",
+            change_detection.get("change_percentage", 0)
         )
 
-
-        # =================================================
-        # 3. Extract Colab response
-        # =================================================
-
-        if not prediction:
-
-            raise HTTPException(
-
-                status_code=502,
-
-                detail=(
-                    "Colab BIT API returned "
-                    "an empty response."
-                )
-            )
-
-
-        if prediction.get("status") != "success":
-
-            raise HTTPException(
-
-                status_code=502,
-
-                detail=(
-                    "Colab BIT API failed: "
-                    f"{prediction}"
-                )
-            )
-
-
-        change_detection = (
-            prediction.get(
-                "change_detection",
-                {}
-            )
+        spatial_analysis.setdefault(
+            "severity",
+            "unknown"
         )
 
-
-        spatial_analysis = (
-            prediction.get(
-                "spatial_analysis",
-                {}
-            )
+        spatial_analysis.setdefault(
+            "dominant_region",
+            None
         )
 
-
-        visualizations = (
-            prediction.get(
-                "visualizations",
-                {}
-            )
+        spatial_analysis.setdefault(
+            "number_of_regions",
+            0
         )
 
-
-        # =================================================
-        # 4. Generate explanation
-        # =================================================
-
-        print(
-            "Generating change explanation..."
+        spatial_analysis.setdefault(
+            "largest_region_pixels",
+            0
         )
 
+        # --------------------------------------------------
+        # Generate explanation
+        # --------------------------------------------------
 
-        explanation = (
-            explanation_service.generate(
-
-                analysis=spatial_analysis
-            )
+        explanation = explanation_service.generate(
+            analysis=spatial_analysis
         )
 
-
-        # =================================================
-        # 5. Build final response
-        # =================================================
+        # --------------------------------------------------
+        # Final response
+        # --------------------------------------------------
 
         return {
-
             "status": "success",
 
-            "input": {
+            "change_detection": change_detection,
 
-                "before_filename": (
-                    before_image.filename
-                ),
+            "spatial_analysis": spatial_analysis,
 
-                "after_filename": (
-                    after_image.filename
-                )
-            },
-
-
-            "change_detection": {
-
-                "change_detected": (
-                    change_detection.get(
-                        "change_detected",
-                        False
-                    )
-                ),
-
-                "change_percentage": (
-                    change_detection.get(
-                        "change_percentage",
-                        0
-                    )
-                ),
-
-                "changed_pixels": (
-                    change_detection.get(
-                        "changed_pixels",
-                        0
-                    )
-                ),
-
-                "total_pixels": (
-                    change_detection.get(
-                        "total_pixels",
-                        0
-                    )
-                ),
-
-                "image_size": (
-                    change_detection.get(
-                        "image_size",
-                        []
-                    )
-                )
-            },
-
-
-            "spatial_analysis": {
-
-                "change_percentage": (
-                    spatial_analysis.get(
-                        "change_percentage",
-                        0
-                    )
-                ),
-
-                "severity": (
-                    spatial_analysis.get(
-                        "severity",
-                        "unknown"
-                    )
-                ),
-
-                "dominant_region": (
-                    spatial_analysis.get(
-                        "dominant_region"
-                    )
-                ),
-
-                "number_of_regions": (
-                    spatial_analysis.get(
-                        "number_of_regions",
-                        0
-                    )
-                ),
-
-                "largest_region_pixels": (
-                    spatial_analysis.get(
-                        "largest_region_pixels",
-                        0
-                    )
-                )
-            },
-
-
-            "visualizations": {
-
-                "mask": (
-                    visualizations.get(
-                        "mask"
-                    )
-                ),
-
-                "overlay": (
-                    visualizations.get(
-                        "overlay"
-                    )
-                )
-            },
-
+            "visualizations": visualizations,
 
             "explanation": explanation
         }
 
-
-    except HTTPException:
-
-        raise
-
-
     except Exception as e:
 
-        print(
-            "ERROR during change detection:"
-        )
-
-        print(
-            repr(e)
-        )
-
+        print("========== DETECTION ERROR ==========")
+        print(repr(e))
+        print("=====================================")
 
         raise HTTPException(
-
             status_code=500,
-
             detail=str(e)
         )
 
-
     finally:
 
-        # =================================================
+        # --------------------------------------------------
         # Cleanup temporary files
-        # =================================================
+        # --------------------------------------------------
 
-        try:
+        if before_path and os.path.exists(before_path):
+            os.remove(before_path)
 
-            if before_path and os.path.exists(
-                before_path
-            ):
-
-                os.remove(
-                    before_path
-                )
-
-
-            if after_path and os.path.exists(
-                after_path
-            ):
-
-                os.remove(
-                    after_path
-                )
-
-        except Exception as cleanup_error:
-
-            print(
-                "Temporary file cleanup failed:"
-            )
-
-            print(
-                repr(cleanup_error)
-            )
+        if after_path and os.path.exists(after_path):
+            os.remove(after_path)
