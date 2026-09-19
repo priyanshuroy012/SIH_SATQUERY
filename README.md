@@ -20,7 +20,7 @@
 
 ---
 
-## ✨ Overview
+## Overview
 
 SATQuery Model 2 uses the **Bitemporal Image Transformer (BIT)** to perform pixel-level change detection between two temporally separated satellite images.
 
